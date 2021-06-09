@@ -168,7 +168,9 @@ def add_dummy_nms_for_onnx(boxes,
     mask = scores.new_zeros(scores.shape)
     # Avoid onnx2tensorrt issue in https://github.com/NVIDIA/TensorRT/issues/1134 # noqa: E501
     # PyTorch style code: mask[batch_inds, box_inds] += 1
-    mask[pos_inds, :] += 1
+    #mask[pos_inds, :] += 1
+    for i in pos_inds:
+        mask[i, 0] += 1
     scores = scores * mask
     boxes = boxes * mask
 

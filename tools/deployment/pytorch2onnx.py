@@ -182,8 +182,8 @@ def pytorch2onnx(config_path,
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Convert MMDetection models to ONNX')
-    parser.add_argument('config', help='test config file path')
-    parser.add_argument('checkpoint', help='checkpoint file')
+    parser.add_argument('--config', help='test config file path')
+    parser.add_argument('--checkpoint', help='checkpoint file')
     parser.add_argument('--input-img', type=str, help='Images for input')
     parser.add_argument(
         '--show',
@@ -207,7 +207,8 @@ def parse_args():
         '--shape',
         type=int,
         nargs='+',
-        default=[800, 1216],
+        #default=[800, 1216],
+        default = [640, 427],
         help='input image size')
     parser.add_argument(
         '--mean',
