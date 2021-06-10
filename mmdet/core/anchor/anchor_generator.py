@@ -168,11 +168,11 @@ class AnchorGenerator:
         h_ratios = torch.sqrt(ratios)
         w_ratios = 1 / h_ratios
         if self.scale_major:
-            ws = (w * w_ratios[:, None] * scales[None, :]).view(-1)
-            hs = (h * h_ratios[:, None] * scales[None, :]).view(-1)
+            ws = (w * w_ratios[:, None] * scales[None, :]).flatten()
+            hs = (h * h_ratios[:, None] * scales[None, :]).flatten()
         else:
-            ws = (w * scales[:, None] * w_ratios[None, :]).view(-1)
-            hs = (h * scales[:, None] * h_ratios[None, :]).view(-1)
+            ws = (w * scales[:, None] * w_ratios[None, :]).flatten()
+            hs = (h * scales[:, None] * h_ratios[None, :]).flatten()
 
         # use float anchor and the anchor's center is aligned with the
         # pixel center
@@ -197,8 +197,11 @@ class AnchorGenerator:
             tuple[torch.Tensor]: The mesh grids of x and y.
         """
         # use shape instead of len to keep tracing while exporting to onnx
-        xx = x.repeat(y.shape[0])
-        yy = y.view(-1, 1).repeat(1, x.shape[0]).view(-1)
+        nx = x.shape[0]
+        ny = y.shape[0]
+        yy, xx = torch.meshgrid(y, x)
+        xx = xx.flatten()
+        yy = yy.flatten()
         if row_major:
             return xx, yy
         else:
@@ -264,7 +267,9 @@ class AnchorGenerator:
         # shifted anchors (K, A, 4), reshape to (K*A, 4)
 
         all_anchors = base_anchors[None, :, :] + shifts[:, None, :]
-        all_anchors = all_anchors.view(-1, 4)
+        #all_anchors = all_anchors.view(-1, 4)
+        s1 = int(all_anchors.shape[0]*all_anchors.shape[1]*all_anchors.shape[2]/4)
+        all_anchors = all_anchors.reshape(s1, 4)        
         # first A rows correspond to A anchors of (0, 0) in feature map,
         # then (0, 1), (0, 2), ...
         return all_anchors
@@ -324,7 +329,7 @@ class AnchorGenerator:
         valid_xx, valid_yy = self._meshgrid(valid_x, valid_y)
         valid = valid_xx & valid_yy
         valid = valid[:, None].expand(valid.size(0),
-                                      num_base_anchors).contiguous().view(-1)
+                                      num_base_anchors).contiguous().flatten()
         return valid
 
     def __repr__(self):
@@ -552,11 +557,11 @@ class LegacyAnchorGenerator(AnchorGenerator):
         h_ratios = torch.sqrt(ratios)
         w_ratios = 1 / h_ratios
         if self.scale_major:
-            ws = (w * w_ratios[:, None] * scales[None, :]).view(-1)
-            hs = (h * h_ratios[:, None] * scales[None, :]).view(-1)
+            ws = (w * w_ratios[:, None] * scales[None, :]).flatten()
+            hs = (h * h_ratios[:, None] * scales[None, :]).flatten()
         else:
-            ws = (w * scales[:, None] * w_ratios[None, :]).view(-1)
-            hs = (h * scales[:, None] * h_ratios[None, :]).view(-1)
+            ws = (w * scales[:, None] * w_ratios[None, :]).flatten()
+            hs = (h * scales[:, None] * h_ratios[None, :]).flatten()
 
         # use float anchor and the anchor's center is aligned with the
         # pixel center
@@ -723,5 +728,5 @@ class YOLOAnchorGenerator(AnchorGenerator):
         responsible_grid[gt_bboxes_grid_idx] = 1
 
         responsible_grid = responsible_grid[:, None].expand(
-            responsible_grid.size(0), num_base_anchors).contiguous().view(-1)
+            responsible_grid.size(0), num_base_anchors).contiguous().flatten()
         return responsible_grid
