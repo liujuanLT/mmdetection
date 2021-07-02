@@ -7,7 +7,7 @@ from mmcv.parallel import MMDataParallel
 from mmdet.apis import single_gpu_test
 from mmdet.datasets import (build_dataloader, build_dataset,
                             replace_ImageToTensor)
-
+import tensorrt as trt
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -116,6 +116,8 @@ def main():
         output_names = ['dets', 'labels']
         if len(cfg.evaluation['metric']) == 2:
             output_names.append('masks')
+        TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE)
+        trt.init_libnvinfer_plugins(TRT_LOGGER, '')
         model = TensorRTDetector(
             args.model,
             class_names=dataset.CLASSES,

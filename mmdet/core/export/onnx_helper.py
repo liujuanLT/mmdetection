@@ -1,7 +1,8 @@
 import os
-
+from torch.onnx.symbolic_helper import parse_args
 import torch
-
+export_NMS = True
+export_to_tensorrt = True
 
 def dynamic_clip_for_onnx(x1, y1, x2, y2, max_shape):
     """Clip boxes dynamically for onnx.
@@ -114,7 +115,13 @@ def add_dummy_nms_for_onnx(boxes,
         tuple[Tensor, Tensor]: dets of shape [N, num_det, 5] and class labels
             of shape [N, num_det].
     """
-    max_output_boxes_per_class = torch.LongTensor([max_output_boxes_per_class])
+    pre_top_k = 1000
+
+    if export_to_tensorrt:
+        max_output_boxes_per_class = torch.tensor(max_output_boxes_per_class, dtype=torch.int32)
+    else:
+        max_output_boxes_per_class = torch.LongTensor([max_output_boxes_per_class])
+    
     iou_threshold = torch.tensor([iou_threshold], dtype=torch.float32)
     score_threshold = torch.tensor([score_threshold], dtype=torch.float32)
     batch_size = scores.shape[0]
@@ -137,65 +144,132 @@ def add_dummy_nms_for_onnx(boxes,
         if labels is not None:
             labels = labels.reshape(-1, 1)[transformed_inds].reshape(
                 batch_size, -1)
+    if not export_NMS:
+        # dets = torch.cat([boxes[:, 0:after_top_k, :], scores[:, 0:after_top_k, 1].unsqueeze(-1)], dim=2)
+        # labels = torch.ones(boxes.shape[0], after_top_k, dtype=torch.long).to(scores.device)
+        # return dets, labels
+        print("export_NMS=False")
+        boxes = boxes.unsqueeze(2)
+        # scores = scores.transpose(1, 2)
+        return boxes, scores
 
     scores = scores.permute(0, 2, 1)
     num_box = boxes.shape[1]
     # turn off tracing to create a dummy output of nms
     state = torch._C._get_tracing_state()
-    # dummy indices of nms's output
-    num_fake_det = 2
-    batch_inds = torch.randint(batch_size, (num_fake_det, 1))
-    cls_inds = torch.randint(num_class, (num_fake_det, 1))
-    box_inds = torch.randint(num_box, (num_fake_det, 1))
-    indices = torch.cat([batch_inds, cls_inds, box_inds], dim=1)
-    output = indices
-    setattr(DummyONNXNMSop, 'output', output)
+
+    torch.manual_seed(0)
+    if export_to_tensorrt:
+        num_fake_det = 2
+        dummy_num_detections = torch.tensor([[num_fake_det]]).expand(batch_size, 1)  # [1,1]
+        dummy_boxes = torch.rand(batch_size, num_fake_det, 4)
+        dummy_scores = torch.rand(batch_size, num_fake_det)
+        # dummy_labels = torch.randint(num_class, (batch_size, num_fake_det)) 
+        # dummy_labels = dummy_labels.type(torch.float32)
+        dummy_labels = torch.tensor([[74, 19]], dtype=torch.float32)
+        setattr(DummyONNXNMSop, 'output', (dummy_num_detections, dummy_boxes, dummy_scores, dummy_labels))
+    else:
+        # dummy indices of nms's output
+        num_fake_det = 2
+        batch_inds = torch.randint(batch_size, (num_fake_det, 1))
+        cls_inds = torch.randint(num_class, (num_fake_det, 1))
+        box_inds = torch.randint(num_box, (num_fake_det, 1))
+        indices = torch.cat([batch_inds, cls_inds, box_inds], dim=1)
+        output = indices
+        setattr(DummyONNXNMSop, 'output', output)
+        # setattr(DummyONNXNMSop, 'output', (output, torch.Tensor([3,4])))
+    
+
+
+    # num_fake_det = 2
+    # dummy_num_detections = torch.tensor([[num_fake_det]]).expand(batch_size, 1)  # [1,1]
+    # # scores_ind = torch.randint(scores.numel(), (num_fake_det,))
+    # scores_ind = torch.tensor([7304, 7369], dtype=torch.int32) # # np.argwhere((scores.flatten()> 0.2))
+    # mask = torch.zeros(scores.numel(), dtype=torch.int32)
+    # for ind in scores_ind:
+    #     mask[ind] += 1
+    # mask = mask.view(scores.shape)
+    # dummy_scores = torch.masked_select(scores, mask>0)
+    # dummy_scores = dummy_scores.unsqueeze(0) # TODO
+    # boxes_mask = mask.unsqueeze()
+    # boxes_mask = boxes_mask.expand(*boxes_mask.shape, 4)
+    # dummy_boxes = torch.masked_selected(boxes, boxes_mask)
+    # dummy_boxes = dummy_boxes.unsqueeze(0)
+    # labels = torch.range(scores.numel).view(scores.shape)%scores.shape[1]//scores.shape[2]
+    # dummy_labels = torch.masked_select(labels, mask)
+    # dummy_labels = torch.unsqueeze(0)
+    # setattr(DummyONNXNMSop, 'output', (dummy_num_detections, d ummy_boxes, dummy_scores, dummy_labels))
+
 
     # open tracing
     torch._C._set_tracing_state(state)
-    selected_indices = DummyONNXNMSop.apply(boxes, scores,
-                                            max_output_boxes_per_class,
-                                            iou_threshold, score_threshold)
 
-    batch_inds, cls_inds = selected_indices[:, 0], selected_indices[:, 1]
-    box_inds = selected_indices[:, 2]
-    if labels is None:
-        labels = torch.arange(num_class, dtype=torch.long).to(scores.device)
-        labels = labels.view(1, num_class, 1).expand_as(scores)
-    scores = scores.reshape(-1, 1)
-    boxes = boxes.reshape(batch_size, -1).repeat(1, num_class).reshape(-1, 4)
-    pos_inds = (num_class * batch_inds + cls_inds) * num_box + box_inds
-    mask = scores.new_zeros(scores.shape)
-    # Avoid onnx2tensorrt issue in https://github.com/NVIDIA/TensorRT/issues/1134 # noqa: E501
-    # PyTorch style code: mask[batch_inds, box_inds] += 1
-    #mask[pos_inds, :] += 1
-    for i in pos_inds:
-        mask[i, 0] += 1
-    scores = scores * mask
-    boxes = boxes * mask
+    if not export_NMS:
+        pass
+    if export_to_tensorrt:
+        # convert input to BatchNMS_TRT
+        boxes = boxes.unsqueeze(2)
+        scores = scores.transpose(1, 2)
+        num_detections, boxes, scores, labels = DummyONNXNMSop.apply(boxes, scores, # boxes:([1, 3652, 4]
+                                                max_output_boxes_per_class,
+                                                iou_threshold, score_threshold)
 
-    scores = scores.reshape(batch_size, -1)
-    boxes = boxes.reshape(batch_size, -1, 4)
-    labels = labels.reshape(batch_size, -1)
+        scores = scores.unsqueeze(2)          # [1, 200, 1]
+        dets = torch.cat([boxes, scores], dim=2)   #  [1, 200, 5]
 
-    nms_after = torch.tensor(
-        after_top_k, device=scores.device, dtype=torch.long)
-    nms_after = get_k_for_topk(nms_after, num_box * num_class)
-
-    if nms_after > 0:
-        _, topk_inds = scores.topk(nms_after)
-        batch_inds = torch.arange(batch_size).view(-1, 1).expand_as(topk_inds)
+    else:
+        selected_indices = DummyONNXNMSop.apply(boxes, scores, # boxes:([1, 3652, 4]
+                                                max_output_boxes_per_class,
+                                                iou_threshold, score_threshold)
+        # convert output from BatchNMS_TRT
+        batch_inds, cls_inds = selected_indices[:, 0], selected_indices[:, 1]
+        box_inds = selected_indices[:, 2]
+        if labels is None:
+            labels = torch.arange(num_class, dtype=torch.long).to(scores.device)
+            labels = labels.view(1, num_class, 1).expand_as(scores) # ([1, 80, 3652])
+        scores = scores.reshape(-1, 1)                              # [1*80*3652, 1]
+        boxes = boxes.reshape(batch_size, -1).repeat(1, num_class).reshape(-1, 4) # [1*80*3652, 4]
+        pos_inds = (num_class * batch_inds + cls_inds) * num_box + box_inds  # box index in all data [2]
+        mask = scores.new_zeros(scores.shape)    # [80*3652, 1]
+        # mask = torch.zeros(scores.shape[0], scores.shape[1], dtype=torch.float32)
+        # mask = torch.zeros_like(scores)
+        # mask = torch.rand(scores.shape, dtype=torch.float32) # fail
+        # mask[:, :] = 0
+        # mask = torch.rand(scores.shape, dtype=torch.float32)
         # Avoid onnx2tensorrt issue in https://github.com/NVIDIA/TensorRT/issues/1134 # noqa: E501
-        transformed_inds = scores.shape[1] * batch_inds + topk_inds
-        scores = scores.reshape(-1, 1)[transformed_inds, :].reshape(
-            batch_size, -1)
-        boxes = boxes.reshape(-1, 4)[transformed_inds, :].reshape(
-            batch_size, -1, 4)
-        labels = labels.reshape(-1, 1)[transformed_inds, :].reshape(
-            batch_size, -1)
+        # PyTorch style code: mask[batch_inds, box_inds] += 1
+        #mask[pos_inds, :] += 1
+        for i in pos_inds:
+            mask[i, 0] += 1
+        scores = scores * mask
+        boxes = boxes * mask
+   
+        scores = scores.reshape(batch_size, -1) # [1, 80*3652]
+        boxes = boxes.reshape(batch_size, -1, 4) # [1, 80*3652, 4]
+        labels = labels.reshape(batch_size, -1) # [1, 80*3652]
 
-    scores = scores.unsqueeze(2)
-    dets = torch.cat([boxes, scores], dim=2)
+        nms_after = torch.tensor(
+            after_top_k, device=scores.device, dtype=torch.long)
+        nms_after = get_k_for_topk(nms_after, num_box * num_class)
+
+        if nms_after > 0:
+            _, topk_inds = scores.topk(nms_after)   # [1, 200]
+            batch_inds = torch.arange(batch_size).view(-1, 1).expand_as(topk_inds) # [1, 200]
+            # Avoid onnx2tensorrt issue in https://github.com/NVIDIA/TensorRT/issues/1134 # noqa: E501
+            transformed_inds = scores.shape[1] * batch_inds + topk_inds   # [1, 200]
+            scores = scores.reshape(-1, 1)[transformed_inds, :].reshape(
+                batch_size, -1)            # [1, 200]
+            boxes = boxes.reshape(-1, 4)[transformed_inds, :].reshape(
+                batch_size, -1, 4)         #  [4, 200, 4]
+            labels = labels.reshape(-1, 1)[transformed_inds, :].reshape(
+                batch_size, -1)            # [1, 200]
+
+        scores = scores.unsqueeze(2)          # [1, 200, 1]
+        dets = torch.cat([boxes, scores], dim=2)   #  [1, 200, 5]
+
+    
+        # dets = selected_indices[:, 2].unsqueeze(0)
+        # labels = selected_indices[:, 1].unsqueeze(0)
     return dets, labels
 
 
@@ -212,13 +286,28 @@ class DummyONNXNMSop(torch.autograd.Function):
         return DummyONNXNMSop.output
 
     @staticmethod
+    @parse_args('v', 'v', 'v', 'v', 'v')
     def symbolic(g, boxes, scores, max_output_boxes_per_class, iou_threshold,
                  score_threshold):
-        return g.op(
-            'NonMaxSuppression',
-            boxes,
-            scores,
-            max_output_boxes_per_class,
-            iou_threshold,
-            score_threshold,
-            outputs=1)
+        if export_to_tensorrt:
+            return g.op(
+                'mydomain::BatchedNMS_TRT', 
+                boxes,
+                scores,
+                max_output_boxes_per_class,
+                iou_threshold,
+                score_threshold,
+                outputs=4)
+        else:
+            return g.op(
+                'NonMaxSuppression', 
+                boxes,
+                scores,
+                max_output_boxes_per_class,
+                iou_threshold,
+                score_threshold,
+                outputs=1)
+
+
+
+    

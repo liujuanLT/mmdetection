@@ -121,7 +121,7 @@ def onnx2tensorrt(onnx_file,
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Convert MMDetection models from ONNX to TensorRT')
-    parser.add_argument('--model', help='Filename of input ONNX model')
+    parser.add_argument('model', help='Filename of input ONNX model')
     parser.add_argument(
         '--trt-file',
         type=str,
@@ -150,8 +150,7 @@ def parse_args():
         '--shape',
         type=int,
         nargs='+',
-        #default=[400, 600],
-        default=[640, 427],
+        default=[400, 600],
         help='Input size of the model')
     parser.add_argument(
         '--max-shape',
